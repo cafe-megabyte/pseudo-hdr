@@ -82,7 +82,7 @@ export async function start(root, {release} = {}) {
       <label class="btn primary"><span>${t.open}</span><input data-ref="file" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg"></label>
     </header>
     <section class="stage" data-ref="stage">
-      <img data-ref="img" alt="" hidden>
+      <img data-ref="imgHdr" alt="" hidden><img data-ref="imgSdr" alt="" hidden>
       <div class="empty" data-ref="empty"><p class="drop">${t.drop}</p><p class="hint">${t.hint}</p></div>
       <div class="busy" data-ref="busy" hidden><span class="spinner"></span><span data-ref="busyText"></span></div>
     </section>
@@ -102,6 +102,7 @@ export async function start(root, {release} = {}) {
         <canvas class="curve" data-ref="curve" width="120" height="44" role="img" aria-label="${t.curve}" title="${t.curve}"></canvas>
         <button type="button" class="info" data-ref="info" aria-label="${t.info}" aria-expanded="false" aria-controls="ph-tip">i</button>
         ${segment('view', t.view, t.views)}
+        <span class="wait" data-ref="wait" aria-hidden="true"><span class="spinner"></span></span>
         <button data-ref="save" class="btn primary" disabled>${t.save}</button>
         <span class="msg" data-ref="msg" role="status"></span>
       </div>
@@ -174,27 +175,73 @@ export async function start(root, {release} = {}) {
     ctx.fillStyle = style.getPropertyValue('--muted'); ctx.font = '10px -apple-system, sans-serif';
     ctx.textAlign = 'right'; ctx.fillText(`${num(2 ** curveStops, 1)}×`, w - 5, 12);
   }
-  // Shows the HDR or the original preview. The new image is decoded before
-  // it replaces the old one, so sliders do not flicker.
-  let showing = 0;
+  // Small spinner for waits the user did not ask for (decoding a preview).
+  // It appears only after WAIT_DELAY, so quick updates do not flash it, and
+  // once visible it stays for at least WAIT_MIN.
+  const WAIT_DELAY = 300, WAIT_MIN = 400;
+  let waitTimer = 0, waitSince = 0;
+  function setWaiting(on) {
+    clearTimeout(waitTimer);
+    if (on) {
+      if (!waitSince) waitTimer = setTimeout(() => { waitSince = performance.now(); $.wait.classList.add('on'); }, WAIT_DELAY);
+    } else if (waitSince) {
+      waitTimer = setTimeout(() => { waitSince = 0; $.wait.classList.remove('on'); },
+        Math.max(0, WAIT_MIN - (performance.now() - waitSince)));
+    }
+  }
+  // Both previews stay decoded and painted in the same grid cell; the one
+  // in front covers the other, so switching the view is instant. New frames
+  // are decoded before they replace the old ones, so sliders do not flicker.
+  // Only one decode runs at a time; frames arriving meanwhile are coalesced.
+  const imgs = {hdr: $.imgHdr, sdr: $.imgSdr};
+  let decoding = false, frameDirty = false, inFlight = [];
+  // A blob URL is revoked once it is neither current, shown nor being decoded.
+  function release(url) {
+    if (!url || url === urls.hdr || url === urls.sdr || inFlight.includes(url)) return;
+    if (Object.values(imgs).some(img => img.getAttribute('src') === url)) return;
+    URL.revokeObjectURL(url);
+  }
+  function front() {
+    $.imgHdr.classList.toggle('front', !showOriginal);
+    $.imgSdr.classList.toggle('front', showOriginal);
+  }
   async function show() {
-    if (!frame) return;
-    const url = showOriginal ? urls.sdr : urls.hdr;
-    if (!url || $.img.src === url) return;
-    const token = ++showing;
-    const probe = new Image();
-    probe.src = url;
-    try { await probe.decode(); } catch { /* shown anyway */ }
-    if (token !== showing) return;
-    $.img.src = url;
-    const dpr = Math.min(window.devicePixelRatio || 1, 4);
-    $.img.style.width = `${frame.width / dpr}px`; $.img.style.height = `${frame.height / dpr}px`;
-    $.img.hidden = false;
+    frameDirty = true;
+    if (decoding) return;
+    decoding = true;
+    setWaiting(true);
+    while (frameDirty && frame) {
+      frameDirty = false;
+      const want = {...urls}, size = {...frame};
+      const kinds = Object.keys(imgs).filter(k => want[k] && imgs[k].getAttribute('src') !== want[k]);
+      inFlight = kinds.map(k => want[k]);
+      await Promise.all(kinds.map(k => { const p = new Image(); p.src = want[k]; return p.decode().catch(() => {}); }));
+      if (opened) {
+        const dpr = Math.min(window.devicePixelRatio || 1, 4);
+        for (const k of kinds) {
+          const img = imgs[k], old = img.getAttribute('src');
+          img.src = want[k];
+          img.style.width = `${size.width / dpr}px`; img.style.height = `${size.height / dpr}px`;
+          img.hidden = false;
+          release(old);
+        }
+      }
+      const done = inFlight; inFlight = [];
+      done.forEach(release);
+    }
+    decoding = false;
+    setWaiting(false);
+  }
+  function clearPreview() {
+    for (const img of Object.values(imgs)) {
+      const old = img.getAttribute('src');
+      img.hidden = true; img.removeAttribute('src'); release(old);
+    }
   }
   function setUrl(kind, buffer) {
     const old = urls[kind];
     urls[kind] = URL.createObjectURL(new Blob([buffer], {type: 'image/jpeg'}));
-    if (old) setTimeout(() => URL.revokeObjectURL(old), 2000);
+    release(old);
   }
   function requestView() {
     const dpr = Math.min(window.devicePixelRatio || 1, 4);
@@ -268,7 +315,7 @@ export async function start(root, {release} = {}) {
       break;
     case 'error':
       if (data.during !== 'export' && busyJob === t.opening) {
-        opened = false; frame = null; $.img.hidden = true; $.img.removeAttribute('src'); $.empty.hidden = false; metaText = ''; updateMeta();
+        opened = false; frame = null; clearPreview(); $.empty.hidden = false; metaText = ''; updateMeta();
       }
       setBusy(null);
       message(errorText(data), 'error');
@@ -289,7 +336,7 @@ export async function start(root, {release} = {}) {
     if (!b || b.disabled) return;
     showOriginal = b.dataset.value === '1';
     for (const x of $.view.querySelectorAll('button')) { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); }
-    show();
+    front();
   });
   $.view.addEventListener('keydown', e => {
     const step = {ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1}[e.key];
@@ -317,7 +364,7 @@ export async function start(root, {release} = {}) {
     clearTimeout(resizeTimer); resizeTimer = setTimeout(() => opened && requestView(), 150);
   });
   observer.observe($.stage);
-  updateMeta(); showValues(); setBusy(null);
+  updateMeta(); showValues(); setBusy(null); front();
 
   return {
     release,

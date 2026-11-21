@@ -14,8 +14,12 @@
 .brand { font-weight: 650; letter-spacing: .02em; white-space: nowrap;
   background: linear-gradient(90deg, #8d9099, #fff7e4 70%, #ffd98f); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .meta { flex: 1; color: var(--muted); font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.stage { position: relative; min-height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.stage img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+/* Both previews share one grid cell (no positioning); .front paints on top
+ * and covers the other, which stays decoded for instant switching. */
+.stage { position: relative; min-height: 0; overflow: hidden; display: grid; grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  place-items: center; }
+.stage img { display: block; grid-area: 1 / 1; max-width: 100%; max-height: 100%; object-fit: contain; }
+.stage img.front { z-index: 1; }
 .stage img[hidden] { display: none; }
 .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
   text-align: center; padding: 24px; gap: 6px; }
@@ -27,6 +31,10 @@
 .spinner { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted); border-top-color: transparent;
   animation: ph-spin .8s linear infinite; }
 @keyframes ph-spin { to { transform: rotate(360deg); } }
+/* Kept in the layout while idle, so showing it never shifts the row. */
+.wait { flex: none; display: flex; width: 18px; height: 18px; visibility: hidden; }
+.wait.on { visibility: visible; }
+.wait:not(.on) .spinner { animation: none; }
 .panel { position: relative; background: var(--panel); border-top: 1px solid var(--line);
   padding: 10px 16px calc(12px + env(safe-area-inset-bottom)); display: grid; gap: 8px; }
 .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
